@@ -228,12 +228,19 @@ u32 randomr(RandomState *state, u32 range)
     return m >> 32;
 }
 
+u64 random_pcg64(RandomState *state)
+{
+    u64 result = random_pcg(state);
+    result = (result << 32) + random_pcg(state);
+    return result;
+}
+
 u64 randomr64(RandomState *state, u64 range)
 {
     u64 mask = round_up_to_power_of_two(range) - 1;
     u64 result = 0;
     do {
-        result = random_pcg(state) & mask;
+        result = random_pcg64(state) & mask;
     } while (result >= range);
     return result;
 }
@@ -251,7 +258,7 @@ typedef union f64bits
 
 f64 random01d(RandomState *state)
 {
-    u64 bits = random_pcg(state) + ((u64)random_pcg(state) << 32);
+    u64 bits = random_pcg64(state);
     f64bits on = { .f = 1. };
     f64bits off = { .u = on.u - 1 };
     f64bits f = { .u = (bits & off.u) | on.u };
