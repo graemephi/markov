@@ -8,19 +8,6 @@
 
 // Warning: uses asserts for error handling
 
-// Todo:
-// - It turns out the way windows are implemented--"state aliasing" I guess you
-//   could call it--can be done independently during analysis or text
-//   generation. So there ought to be separate window parameters.
-// - Composable markov chains:
-//
-//       MarkovChain a, b, c; ...; c = compose(&a, &b);
-//
-//   The only impedement to this efficient rejection sampling. Possible
-//   solution: parallel array of generation markers per state in 'leaf' chains,
-//   reject tokens by setting their generation to the current generation,
-//   increment generation for each generated state.
-
 #define Config_DumpBucketStats 0
 #define Config_DetectHashCollisions 0
 
