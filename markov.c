@@ -22,8 +22,7 @@
 //   increment generation for each generated state.
 
 #define Config_DumpBucketStats 0
-#define Config_DetectHashCollisions 1
-#define Config_ColorizeOutput 0
+#define Config_DetectHashCollisions 0
 
 #if defined(_MSC_VER)
 #pragma warning(disable : 4146) // unary minus operator applied to unsigned type, result still unsigned
@@ -40,6 +39,8 @@
 #define alignof _Alignof
 
 typedef uint8_t u8;
+typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int32_t i32;
@@ -75,10 +76,10 @@ typedef double f64;
 
 #define array_length(arr) (isize)((sizeof(arr) / sizeof((arr)[0])))
 
-#if defined(_MSC_VER)
-
 #undef min
 #undef max
+
+#if defined(_MSC_VER)
 
 b32 QueryPerformanceCounter(i64 *lpPerformanceCount);
 b32 QueryPerformanceFrequency(i64 *lpFrequency);
@@ -97,19 +98,78 @@ f64 seconds_between(i64 a, i64 b)
     if (tick_frequency == 0) {
         QueryPerformanceFrequency(&tick_frequency);
     }
-    return (double)(b - a) / (double)tick_frequency;
+    return (f64)(b - a) / (f64)tick_frequency;
 }
+
+void *CreateThread(void *lpThreadAttributes, usize dwStackSize, i32 (*lpStartAddress)(void *), void *lpParameter, u32 dwCreationFlags, u32 *lpThreadId);
+i32 WaitForMultipleObjects(u32 nCount, const void **lpHandles, b32 bWaitAll, i32 dwMilliseconds);
+
+typedef struct Win32_SYSTEM_INFO {
+  union {
+    u32 dwOemId;
+    struct {
+      u16 wProcessorArchitecture;
+      u16 wReserved;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
+  u32     dwPageSize;
+  void *lpMinimumApplicationAddress;
+  void *lpMaximumApplicationAddress;
+  u32 *dwActiveProcessorMask;
+  u32     dwNumberOfProcessors;
+  u32     dwProcessorType;
+  u32     dwAllocationGranularity;
+  u16      wProcessorLevel;
+  u16      wProcessorRevision;
+} Win32_SYSTEM_INFO, *Win32_LPSYSTEM_INFO;
+void GetSystemInfo(Win32_LPSYSTEM_INFO lpSystemInfo);
+
+void *create_thread(i32 (*fn)(void *), void *data)
+{
+    return CreateThread(0, MB(4), fn, data, 0, 0);
+}
+
+void wait_for_threads(void **threads, isize n_threads)
+{
+    WaitForMultipleObjects((u32)n_threads, threads, true, 0xffffffffL);
+}
+
+i32 core_count()
+{
+    Win32_SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwNumberOfProcessors;
+}
+
+
+void *VirtualAlloc(void *lpAddress, usize dwSize, u32 flAllocationType, u32 flProtect);
+
+// Overcommit on windows.
+void *system_alloc(isize size)
+{
+    return VirtualAlloc(0, (usize)size, 0x00001000|0x00002000, 0x04);
+}
+
+#define thread_local __declspec(thread)
+
 #else
+
 #define LINE1(x) #x
 #define LINE2(x) LINE1(x)
-#pragma message("markov.c:" LINE2(__LINE__) ": Not win32. Using stubbed out timer functions")
+#pragma message("markov.c:" LINE2(__LINE__) ": Not win32. Using stubbed out thread and timer functions")
 i64 ticks() { return 0; }
 f64 seconds_between(i64 a, i64 b) { (void)a; (void)b; return 0.0; }
+void *create_thread(i32 (*fn)(void *), void *data) { fn(data); return 0; }
+void wait_for_threads(void *threads, isize n_threads) { (void)threads; (void)n_threads; }
+void *system_alloc(isize size) { return malloc((usize)size); }
+i32 core_count() { return 1; }
+#define thread_local
+
 #endif
 
-double to_mb(isize x)
+f64 to_mb(isize x)
 {
-    return (double)x * (1. / 1024. / 1024.);
+    return (f64)x * (1. / 1024. / 1024.);
 }
 
 b32 always(b32 condition) {
@@ -281,10 +341,10 @@ void test_random()
     f64 var = 0.;
     for (isize i = 0; i < array_length(counts); i++) {
         assert(counts[i]);
-        avg += (double)counts[i] / (double)n;
+        avg += (f64)counts[i] / (f64)n;
     }
     for (isize i = 0; i < array_length(counts); i++) {
-        f64 d = ((double)counts[i] / (double)n) - avg;
+        f64 d = ((f64)counts[i] / (f64)n) - avg;
         var += d*d;
     }
     f64 dev = sqrt(var);
@@ -325,6 +385,7 @@ typedef struct Stack
     u8 *end;
 } Stack;
 
+thread_local
 Stack scratch = {0};
 
 #define stack_alloc(stack, type, count) (type *)stack_alloc_(stack, sizeof(type), alignof(type), count)
@@ -360,7 +421,7 @@ void *stack_alloc_down_(Stack *stack, isize elem_size, isize alignment, isize co
 
     isize size = elem_size * count;
     isize align = (usize)stack->end & (alignment - 1);
-    size += align;
+    stack->end -= align;
 
     isize cap = stack->end - stack->base;
 
@@ -369,7 +430,7 @@ void *stack_alloc_down_(Stack *stack, isize elem_size, isize alignment, isize co
     }
 
     stack->end -= size;
-    u8 *result = stack->end - align;
+    u8 *result = stack->end;
     assert(((usize)result & (alignment - 1)) == 0);
     return result;
 }
@@ -383,7 +444,7 @@ void *stack_alloc_zero_(Stack *stack, isize elem_size, isize alignment, isize co
 }
 
 
-#define stack_push(stack, type, elem) (type *)stack_push_(stack, sizeof(type), alignof(type), (type[1]){elem})
+#define stack_push(stack, type, ...) (type *)stack_push_(stack, sizeof(type), alignof(type), (type[1]){__VA_ARGS__})
 void *stack_push_(Stack *stack, isize elem_size, isize alignment, void *elem)
 {
     void *result = stack_alloc_(stack, elem_size, alignment, 1);
@@ -401,6 +462,17 @@ Stack push_stack(Stack *stack)
     Stack child_stack = (Stack) { stack->ptr, stack->ptr, stack->end };
     stack->ptr = stack->end;
     return child_stack;
+}
+
+Stack push_stack_size(Stack *stack, isize size)
+{
+    if (never((stack->ptr + size) > stack->end)) {
+        return (Stack) {0};
+    }
+
+    Stack result = { stack->ptr, stack->ptr, stack->ptr + size };
+    stack->ptr = result.end;
+    return result;
 }
 
 void reclaim_stack(Stack *stack, Stack *child_stack)
@@ -691,7 +763,8 @@ void bucket_free_(BucketAllocator *buckets, isize elem_size, void *buffer, isize
     }
 }
 
-BucketAllocator everything_else = {0};
+thread_local
+BucketAllocator buckets = {0};
 
 typedef struct HashTable
 {
@@ -708,12 +781,12 @@ void table_fit(HashTable *table, isize count)
 {
     count = round_up_to_power_of_two(count);
     if (count > table->capacity) {
-        table->keys_linear = bucket_realloc(&everything_else, usize, table->keys_linear, table->capacity, count);
-        table->values_linear = bucket_realloc(&everything_else, usize, table->values_linear, table->capacity, count);
-        bucket_free(&everything_else, usize, table->keys, table->capacity);
-        bucket_free(&everything_else, u32, table->value_indices, table->capacity);
-        table->keys = bucket_alloc_zero(&everything_else, usize, count);
-        table->value_indices = bucket_alloc_zero(&everything_else, u32, count);
+        table->keys_linear = bucket_realloc(&buckets, usize, table->keys_linear, table->capacity, count);
+        table->values_linear = bucket_realloc(&buckets, usize, table->values_linear, table->capacity, count);
+        bucket_free(&buckets, usize, table->keys, table->capacity);
+        bucket_free(&buckets, u32, table->value_indices, table->capacity);
+        table->keys = bucket_alloc_zero(&buckets, usize, count);
+        table->value_indices = bucket_alloc_zero(&buckets, u32, count);
         table->capacity = count;
         table->collisions = 0;
 
@@ -898,7 +971,7 @@ b32 hashcounter_contains(HashCounter *table, u32 key)
     return result;
 }
 
-void hashcounter_increment(BucketAllocator *buckets, HashCounter *table, u32 key, i32 inc)
+void hashcounter_increment(HashCounter *table, u32 key, i32 inc)
 {
     u32 *keys = hashcounter_keys(table);
     u32 *values = hashcounter_values(table);
@@ -913,8 +986,8 @@ void hashcounter_increment(BucketAllocator *buckets, HashCounter *table, u32 key
         }
         if (table->occupied == HashCounter_InPlaceCutoff) {
             i32 new_cap = HashCounter_LinearSearchInitialSize;
-            u32 *keys_linear = bucket_alloc(buckets, u32, new_cap);
-            u32 *values_linear = bucket_alloc(buckets, u32, new_cap);
+            u32 *keys_linear = bucket_alloc(&buckets, u32, new_cap);
+            u32 *values_linear = bucket_alloc(&buckets, u32, new_cap);
             for (isize i = 0; i < table->occupied; i++) {
                 keys_linear[i] = keys[i];
                 values_linear[i] = values[i];
@@ -930,8 +1003,8 @@ void hashcounter_increment(BucketAllocator *buckets, HashCounter *table, u32 key
             i32 old_cap = table->capacity;
             i32 new_cap = old_cap * 2;
             table->capacity = new_cap;
-            table->keys_linear = bucket_realloc(buckets, u32, table->keys_linear, old_cap, new_cap);
-            table->values_linear = bucket_realloc(buckets, u32, table->values_linear, old_cap, new_cap);
+            table->keys_linear = bucket_realloc(&buckets, u32, table->keys_linear, old_cap, new_cap);
+            table->values_linear = bucket_realloc(&buckets, u32, table->values_linear, old_cap, new_cap);
             keys = table->keys_linear;
             values = table->values_linear;
         }
@@ -941,11 +1014,11 @@ void hashcounter_increment(BucketAllocator *buckets, HashCounter *table, u32 key
             i32 old_cap = table->capacity;
             i32 new_cap = old_cap * 2;
             table->capacity = new_cap;
-            table->keys_linear = bucket_realloc(buckets, u32, table->keys_linear, old_cap, new_cap);
-            table->values_linear = bucket_realloc(buckets, u32, table->values_linear, old_cap, new_cap);
+            table->keys_linear = bucket_realloc(&buckets, u32, table->keys_linear, old_cap, new_cap);
+            table->values_linear = bucket_realloc(&buckets, u32, table->values_linear, old_cap, new_cap);
             keys = table->keys_linear;
             values = table->values_linear;
-            table->value_indices = bucket_realloc(buckets, u32, table->value_indices, old_cap, new_cap);
+            table->value_indices = bucket_realloc(&buckets, u32, table->value_indices, old_cap, new_cap);
             memset(table->value_indices, 0, new_cap*sizeof(u32));
 
             isize mask = new_cap - 1;
@@ -1064,12 +1137,14 @@ typedef struct TokenString
     i32 capacity;
 } TokenString;
 
-u32 foreground_color_tokens[256] = {0};
-u32 background_color_tokens[256] = {0};
-
 b32 is_whitespace(u8 *p)
 {
-    return (*p != 0) && (*p <= ' ') && (*p != '\n');
+    return (*p != 0) && (*p <= ' ');
+}
+
+b32 is_whitespace_excluding_newline(u8 *p)
+{
+    return is_whitespace(p) && (*p != '\n');
 }
 
 void push_token(TokenString *str, u32 token)
@@ -1096,7 +1171,7 @@ void pop_tokens(TokenString *str, i32 count)
 
 void print_tokens(u32 *tokens, isize length)
 {
-    b32 double_quote_flipflop = 0;
+    b32 f64_quote_flipflop = 0;
     b32 needs_space = true;
 
     // Pretty bad, but I don't care
@@ -1111,8 +1186,8 @@ void print_tokens(u32 *tokens, isize length)
             case '"': {
                 // Wrong half the time
                 printf("\"");
-                needs_space = double_quote_flipflop;
-                double_quote_flipflop ^= 1;
+                needs_space = f64_quote_flipflop;
+                f64_quote_flipflop ^= 1;
             } break;
             case '.':
             case ',':
@@ -1142,9 +1217,6 @@ void print_tokens(u32 *tokens, isize length)
                 printf("%c", token[1]);
             } break;
             default: {
-                if (tokens[i] && tokens[i] >= foreground_color_tokens[0] && tokens[i] <= background_color_tokens[255]) {
-                    needs_space = false;
-                }
                 if (needs_space) {
                     printf(" ");
                 }
@@ -1172,7 +1244,7 @@ compile_time_assert(sizeof(MarkovRow) == 64);
 
 typedef struct MarkovChain
 {
-    SourceText *source;
+    SourceText source;
 
     // With large texts and large window_power multipliers, hashcounter values
     // can overflow. If they have, this is set to true.
@@ -1184,10 +1256,12 @@ typedef struct MarkovChain
     i32 stride;
     // Number of tokens back to look
     i32 offset;
-    // Size of window to double count over
-    i32 window;
-    // Scale count by window_powers[window_position]. Must be of size window + 1. (... todo: should be actual arrays, with bounds checking)
-    i32 *window_powers;
+    // Size of window to f64 count over
+    i32 analysis_window;
+    i32 generator_window;
+    // Scale count by window_powers[window_position]. Must be of size window + 1.
+    i32 *analysis_window_powers;
+    i32 *generator_window_powers;
     // Probability multiplier on generation
     f64 power;
     // Require that this chain can make any transition drawn from a set
@@ -1204,10 +1278,19 @@ typedef struct MarkovChainSet
     MarkovChain *chains;
     isize count;
 
+    // If set, use chain power as the probabilty of a draw from a chain.
+    // Otherwise, use the cumulative row value scaled by the chain power,
+    // relative to the rows of other chains.
+    b32 absolute_power;
+
+    // Power of this set when generating from multiple sets.
+    f64 set_power;
+
     i32 order;
     i32 stride;
     i32 offset;
-    i32 window;
+    i32 analysis_window;
+    i32 generator_window;
     i32 state_size;
 
     i32 *generated_counts;
@@ -1232,13 +1315,13 @@ usize hash_state_flatten_zero(u32 *tokens, isize order)
 void dump_markov_row(MarkovChain *chain, MarkovRow *row)
 {
     printf("\"");
-    print_tokens(&chain->source->text.tokens[row->position_first_seen], chain->order);
+    print_tokens(&chain->source.text.tokens[row->position_first_seen], chain->order);
     printf("\" (%lld):\n", row->cumulative);
     u32 *keys = hashcounter_keys(&row->counts);
     u32 *counts = hashcounter_values(&row->counts);
     for (isize i = 0; i < row->counts.occupied; i++) {
         printf("\t");
-        print_tokens(chain->source->text.tokens + keys[i], chain->stride);
+        print_tokens(chain->source.text.tokens + keys[i], chain->stride);
         printf(" (%d)\n", counts[i]);
     }
     printf("\n");
@@ -1256,23 +1339,31 @@ void markov_chain_set_init(MarkovChainSet *set)
     i32 offset = 0;
     i32 order = 0;
     i32 stride = 0;
-    i32 window = 0;
+    i32 analysis_window = 0;
+    i32 generator_window = 0;
     i32 min_stride = chains[0].stride;
     for (isize i = 0; i < set->count; i++) {
         assert(chains[i].count_overflow == false);
         assert(chains[i].order >= 0);
         assert(chains[i].offset >= 0);
-        assert(chains[i].window >= 0);
+        assert(chains[i].analysis_window >= 0);
         offset = max(offset, chains[i].offset);
         order = max(order, chains[i].order);
-        window = max(window, chains[i].window);
+        analysis_window = max(analysis_window, chains[i].analysis_window);
+        generator_window = max(generator_window, chains[i].generator_window);
         stride = max(stride, chains[i].stride);
         min_stride = min(min_stride, chains[i].stride);
 
-        if (chains[i].window_powers == 0) {
-            chains[i].window_powers = stack_alloc(&scratch, i32, chains[i].window + 1);
-            for (isize j = 0; j <= chains[i].window; j++) {
-                chains[i].window_powers[j] = 1;
+        if (chains[i].analysis_window_powers == 0) {
+            chains[i].analysis_window_powers = stack_alloc(&scratch, i32, chains[i].analysis_window + 1);
+            for (isize j = 0; j <= chains[i].analysis_window; j++) {
+                chains[i].analysis_window_powers[j] = 1;
+            }
+        }
+        if (chains[i].generator_window_powers == 0) {
+            chains[i].generator_window_powers = stack_alloc(&scratch, i32, chains[i].generator_window + 1);
+            for (isize j = 0; j <= chains[i].generator_window; j++) {
+                chains[i].generator_window_powers[j] = 1;
             }
         }
     }
@@ -1286,26 +1377,26 @@ void markov_chain_set_init(MarkovChainSet *set)
     set->order = order;
     set->offset = offset;
     set->stride = stride;
-    set->window = window;
-    set->state_size = order + offset + window;
+    set->analysis_window = analysis_window;
+    set->generator_window = generator_window;
+    set->state_size = order + offset + max(analysis_window, generator_window);
 }
 
-void build_markov_chain(Stack *memory, MarkovChain *chain)
+void build_markov_chain(MarkovChain *chain)
 {
-    TokenString *text = &chain->source->text;
-    HashTable *states = &chain->source->states;
+    TokenString *text = &chain->source.text;
+    HashTable *states = &chain->source.states;
 
     chain->stride = chain->stride ? chain->stride : 1;
 
-    BucketAllocator buckets = { .allocator = push_stack(memory) };
-    RingBuffer *window = stack_push(&scratch, RingBuffer, make_ringbuffer(&scratch, chain->window + 1));
+    RingBuffer *window = stack_push(&scratch, RingBuffer, make_ringbuffer(&scratch, chain->analysis_window + 1));
 
     i32 *window_powers = 0;
-    if (chain->window_powers) {
-        window_powers = chain->window_powers;
+    if (chain->analysis_window_powers) {
+        window_powers = chain->analysis_window_powers;
     } else {
-        window_powers = stack_alloc(&scratch, i32, chain->window + 1);
-        for (isize i = 0; i <= chain->window; i++) {
+        window_powers = stack_alloc(&scratch, i32, chain->analysis_window + 1);
+        for (isize i = 0; i <= chain->analysis_window; i++) {
             window_powers[i] = 1;
         }
     }
@@ -1314,7 +1405,7 @@ void build_markov_chain(Stack *memory, MarkovChain *chain)
 
     table_fit(&chain->state_to_row, text->length / 8);
 
-    isize state_size = chain->order + chain->offset + chain->window;
+    isize state_size = chain->order + chain->offset + chain->analysis_window;
     // Defaults--sample the entire text contiguously
     isize sample_count = 1;
     isize states_per_sample = text->length - state_size - chain->stride;
@@ -1329,7 +1420,7 @@ void build_markov_chain(Stack *memory, MarkovChain *chain)
     }
 
     for (isize n = 0; n < sample_count; n++) {
-        for (isize i = 0; i < chain->window; i++) {
+        for (isize i = 0; i < chain->analysis_window; i++) {
             isize idx = i + sample_index;
             usize state_key = hash_state(&text->tokens[idx], chain->order);
             isize state_index = table_get(&chain->state_to_row, state_key);
@@ -1348,7 +1439,7 @@ void build_markov_chain(Stack *memory, MarkovChain *chain)
         }
 
         isize end = sample_index + state_size + states_per_sample;
-        for (isize end_of_window = sample_index + chain->window, end_of_state = sample_index + state_size; end_of_state < end; end_of_window++, end_of_state++) {
+        for (isize end_of_window = sample_index + chain->analysis_window, end_of_state = sample_index + state_size; end_of_state < end; end_of_window++, end_of_state++) {
             usize next_key = hash_state_flatten_zero(&text->tokens[end_of_state], chain->stride);
             u32 next_state = (u32)table_get_or_add_value(states, next_key, end_of_state);
 
@@ -1377,17 +1468,15 @@ void build_markov_chain(Stack *memory, MarkovChain *chain)
 
             ringbuffer_push(window, (usize)row);
 
-            for (isize i = 0; i <= chain->window; i++) {
+            for (isize i = 0; i <= chain->analysis_window; i++) {
                 MarkovRow *row_in_window = (MarkovRow *)ringbuffer_get(window, i);
-                hashcounter_increment(&buckets, &row_in_window->counts, next_state, window_powers[i]);
+                hashcounter_increment(&row_in_window->counts, next_state, window_powers[i]);
                 row_in_window->cumulative += window_powers[i];
             }
         }
 
         sample_index = randomr(&random_state, (u32)last_sample);
     }
-
-    dump_buckets(&buckets);
 
     for (isize i = 0; i < chain->state_to_row.occupied; i++) {
         MarkovRow *row = (MarkovRow *)chain->state_to_row.values_linear[i];
@@ -1403,8 +1492,73 @@ void build_markov_chain(Stack *memory, MarkovChain *chain)
         assert(row->cumulative == sum);
         chain->count_overflow = row->cumulative != sum;
     }
+}
 
-    reclaim_stack(memory, &buckets.allocator);
+typedef struct MarkovChainThreadData
+{
+    Stack stack;
+    MarkovChain **chains;
+    i32 start;
+    i32 end;
+} MarkovChainThreadData;
+
+i32 build_markov_chain_thread(void *userdata)
+{
+    MarkovChainThreadData *data = userdata;
+    if (scratch.base == 0) {
+        scratch = push_stack_size(&data->stack, MB(8));
+    }
+    if (buckets.allocator.base == 0) {
+        buckets.allocator = push_stack_size(&data->stack, GB(2));
+    }
+    for (isize i = data->start; i < data->end; i++) {
+        build_markov_chain(data->chains[i]);
+    }
+    dump_buckets(&buckets);
+    return 0;
+}
+
+void build_markov_chain_sets(Stack *memory, MarkovChainSet *sets, i32 set_count)
+{
+    i32 thread_count = core_count();
+    void **threads = stack_alloc(&scratch, void *, thread_count);
+
+    isize n_chains = 0;
+    for (i32 i = 0; i < set_count; i++) {
+        n_chains += sets[i].count;
+    }
+
+    MarkovChain **chains = stack_alloc(&scratch, MarkovChain *, n_chains);
+
+    isize chain_index = 0;
+    for (i32 i = 0; i < set_count; i++) {
+        for (i32 j = 0; j < sets[i].count; j++) {
+            chains[chain_index++] = &sets[i].chains[j];
+        }
+    }
+
+    i32 chains_per_thread = (i32)n_chains / thread_count;
+    isize stack_space_per_thread = (memory->end - memory->ptr) / thread_count;
+    i32 remainder = n_chains % thread_count;
+    i32 start = 0;
+    i32 end = chains_per_thread;
+    for (i32 i = 0; i < thread_count; i++) {
+        Stack chain_stack = push_stack_size(memory, stack_space_per_thread);
+        if (remainder) {
+            remainder--;
+            end++;
+        }
+        threads[i] = create_thread(build_markov_chain_thread, stack_push(&scratch, MarkovChainThreadData, (MarkovChainThreadData) {
+            .stack = chain_stack,
+            .chains = chains,
+            .start = start,
+            .end = end
+        }));
+        start = end;
+        end += chains_per_thread;
+    }
+    assert(end == (n_chains + chains_per_thread));
+    wait_for_threads(threads, thread_count);
 }
 
 typedef struct ActiveRow
@@ -1440,15 +1594,15 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
     Stack stack = push_stack(&scratch);
     usize null_key = hash_state(&(u32){0}, 1);
 
-    ActiveRow *active_rows = stack_alloc(&stack, ActiveRow, set->count * (set->window + 1));
+    ActiveRow *active_rows = stack_alloc(&stack, ActiveRow, set->count * (set->generator_window + 1));
     isize active_count = 0;
     isize possible_transitions = 0;
     isize zero_power_transitions = 0;
     f64 power = 0.;
     for (i32 i = 0; i < set->count; i++) {
         MarkovChain *chain = &set->chains[i];
-        isize state_offset = set->state_size - chain->order - chain->offset - chain->window;
-        for (i32 j = 0; j <= chain->window; j++) {
+        isize state_offset = set->state_size - chain->order - chain->offset - chain->generator_window;
+        for (i32 j = 0; j <= chain->generator_window; j++) {
             usize state_hash = hash_state(state_tokens + state_offset + j, chain->order);
             isize index = table_get(&chain->state_to_row, state_hash);
             if (index >= 0) {
@@ -1457,10 +1611,15 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
                 // For big values this will make a mess of the precision of the
                 // boundary values. But choosing within a row will be fine,
                 // because it's all integer based.
-                i64 cumulative = row->cumulative * chain->window_powers[chain->window - j];
+                i64 cumulative = row->cumulative * chain->generator_window_powers[chain->generator_window - j];
                 assert(cumulative >= 0);
 
-                power += (f64)cumulative * chain->power;
+                if (set->absolute_power) {
+                    power += chain->power;
+                } else {
+                    power += (f64)cumulative * chain->power;
+                }
+
                 possible_transitions += row->counts.occupied;
                 active_rows[active_count++] = (ActiveRow) {
                     .chain = chain,
@@ -1468,7 +1627,7 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
                     .boundary = power,
                     .cumulative = cumulative,
                     .chain_index = i,
-                    .window_index = chain->window - j,
+                    .window_index = chain->generator_window - j,
                     .required = chain->required
                 };
 
@@ -1498,18 +1657,24 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
             row_choices[i] = choice;
             u32 *counts = hashcounter_values(&row->counts);
             for (isize j = 0; j < row->counts.occupied; j++) {
-                *choice++ = (i64)counts[j] * chain->window_powers[window_index];
+                *choice++ = (i64)counts[j] * chain->generator_window_powers[window_index];
             }
         }
 
-        while (true) {
+        while (possible_transitions > 0) {
             if (possible_transitions == zero_power_transitions) {
                 // There are no non-zero power rows left to use, so unlock
                 // the zero power rows
                 power = 0.;
                 for (isize i = 0; i < active_count; i++) {
                     assert_implies(active_rows[i].chain->power > 0, active_rows[i].cumulative == 0);
-                    power += (f64)active_rows[i].cumulative;
+                    if (active_rows[i].cumulative > 0) {
+                        if (set->absolute_power) {
+                            power += 1.;
+                        } else {
+                            power += (f64)active_rows[i].cumulative;
+                        }
+                    }
                     active_rows[i].boundary = power;
                 }
             }
@@ -1545,25 +1710,23 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
             u32 state = states[transition];
             isize idx = state;
             for (isize k = 0; k < chain->stride; k++) {
-                push_token(string, chain->source->text.tokens[idx++]);
+                push_token(string, chain->source.text.tokens[idx++]);
             }
 
             b32 state_ok = true;
             for (isize i = 0; i < active_count && state_ok; i++) {
                 MarkovChain *req_chain = active_rows[i].chain;
                 if (active_rows[i].required && chain != req_chain) {
-                    if (req_chain->stride == chain->stride && req_chain->source == chain->source) {
-                        state_ok = hashcounter_contains(&active_rows[i].row->counts, state);
-                    } else {
+                    if (hashcounter_contains(&active_rows[i].row->counts, state) == false) {
                         // We need to reconstruct the hash.. hoo boy
                         state_ok = false;
 
                         assert(req_chain->stride <= chain->stride);
-                        usize key = hash_state_flatten_zero(&chain->source->text.tokens[state], req_chain->stride);
+                        usize key = hash_state_flatten_zero(&chain->source.text.tokens[state], req_chain->stride);
                         if (key != null_key) {
-                            isize req_state_index = table_get(&req_chain->source->states, key);
+                            isize req_state_index = table_get(&req_chain->source.states, key);
                             if (req_state_index >= 0) {
-                                u32 req_state = (u32)table_value(&req_chain->source->states, req_state_index);
+                                u32 req_state = (u32)table_value(&req_chain->source.states, req_state_index);
                                 state_ok = hashcounter_contains(&active_rows[i].row->counts, req_state);
                             }
                         }
@@ -1571,25 +1734,37 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
                 }
             }
 
-            if (possible_transitions > 1 && state_ok == false) {
+            if (state_ok == false) {
                 possible_transitions--;
 
                 pop_tokens(string, chain->stride);
 
                 i64 count_removed = row_choices[row_choice][transition];
-                f64 power_removed = chain->power * (f64)count_removed;
-
                 active_row->cumulative -= count_removed;
+
+                f64 power_removed = 0.;
+                if (set->absolute_power == false) {
+                    power_removed = (f64)count_removed;
+                    if (possible_transitions >= zero_power_transitions) {
+                        power_removed *= chain->power;
+                    }
+                }
+
+                if (active_row->cumulative == 0) {
+                    active_row->required = false;
+
+                    if (set->absolute_power) {
+                        assert_implies(active_row->chain->power == 0, possible_transitions < zero_power_transitions);
+                        power_removed = active_row->chain->power ? active_row->chain->power : 1.;
+                    }
+                }
+
                 power -= power_removed;
                 for (isize i = row_choice; i < active_count; i++) {
                     active_rows[i].boundary -= power_removed;
                 }
 
                 counts[transition] = 0;
-
-                if (active_row->cumulative == 0) {
-                    active_row->required = false;
-                }
 
                 set->rejected_counts[chain_index]++;
                 continue;
@@ -1610,52 +1785,55 @@ PushRandomStateTransitionResult push_random_state_transition(TokenString *string
     return result;
 }
 
-TokenString generate_markov_text(MarkovChainSet *set, u32 *initial_state, isize length)
+TokenString generate_markov_text(MarkovChainSet *sets, i32 set_count, u32 *initial_state, isize length)
 {
-#if defined(Config_ColorizeOutput) && Config_ColorizeOutput
-    TokenString output = {0};
     TokenString result = {0};
+    f64 power = 0.;
 
-    markov_chain_set_init(set);
-
-    for (isize i = 0; i < set->state_size; i++) {
-        push_token(&output, initial_state[i]);
-        push_token(&result, initial_state[i]);
+    isize state_size = 0;
+    for (isize i = 0; i < set_count; i++) {
+        markov_chain_set_init(&sets[i]);
+        state_size = max(state_size, sets[i].state_size);
+        power += sets[i].set_power;
     }
 
-    isize color_picker = 0;
-    isize generated = 0;
-    while (output.length < length) {
-        u32 *state = &output.tokens[generated];
-        PushRandomStateTransitionResult prst = push_random_state_transition(&output, set, state);
-        isize color = 16 + (color_picker++ % 231);
-        push_token(&result, foreground_color_tokens[color]);
-        push_token(&result, background_color_tokens[(16+(prst.chain_index*3)) & 255]);
-        for (isize i = 0; i < prst.n_generated; i++) {
-            push_token(&result, output.tokens[generated++]);
-        }
-    }
-
-    free(output.tokens);
-    return result;
-#else
-    TokenString result = {0};
-
-    markov_chain_set_init(set);
-
-    for (isize i = 0; i < set->state_size; i++) {
+    for (isize i = 0; i < state_size; i++) {
         push_token(&result, initial_state[i]);
     }
 
     isize generated = 0;
     while (result.length < length) {
         u32 *state = &result.tokens[generated];
-        PushRandomStateTransitionResult prst = push_random_state_transition(&result, set, state);
+        u32 set = 0;
+        if (power > 0) {
+            f64 choice = random01d(&random_state) * power;
+            f64 acc = 0;
+            for (isize i = 0; i < set_count; i++) {
+                acc += sets[i].set_power;
+                if (choice <= acc) {
+                    set = (u32)i;
+                    break;
+                }
+            }
+        } else {
+            set = randomr(&random_state, set_count);
+        }
+
+        PushRandomStateTransitionResult prst = push_random_state_transition(&result, &sets[set], state);
+        if (prst.chain_index == -1) {
+            for (isize i = 0; i < set_count - 1; i++) {
+                pop_tokens(&result, 1);
+                set = (set + 1) % set_count;
+                prst = push_random_state_transition(&result, &sets[set], state);
+                if (prst.chain_index >= 0) {
+                    break;
+                }
+            }
+        }
         generated += prst.n_generated;
     }
 
     return result;
-#endif
 }
 
 enum {
@@ -1665,7 +1843,7 @@ enum {
     Markdown_Consecutive
 };
 
-u8 markdown_char_type[256] = {
+static const u8 markdown_char_type[256] = {
     [0] = Markdown_Whitespace,
     [1] = Markdown_Whitespace,
     [2] = Markdown_Whitespace,
@@ -1708,6 +1886,7 @@ u8 markdown_char_type[256] = {
     ['-'] = Markdown_Single,
     ['+'] = Markdown_Single,
     ['='] = Markdown_Single,
+    ['<'] = Markdown_Single,
     ['>'] = Markdown_Single,
     ['('] = Markdown_Single,
     [')'] = Markdown_Single,
@@ -1786,19 +1965,20 @@ TokenString tokenize_md(File *file)
 
 TokenString tokenize_wiki103(File *file)
 {
-    u8 *text = file->data;
     // Todo: There's some weird junk like \n"\n"\n in the csv that might be worth filtering out
+
+    u8 *text = file->data;
     assert(text[file->size - 1] == 0);
 
     TokenString result = {0};
 
     u8 *p = text;
     while (*p) {
-        while (*p && is_whitespace(p)) {
+        while (*p && is_whitespace_excluding_newline(p)) {
             p++;
         }
         u8 *start = p;
-        while (*p && (is_whitespace(p) == false)) {
+        while (*p && (is_whitespace_excluding_newline(p) == false)) {
             p++;
         }
         u8 *end = p;
@@ -1821,6 +2001,111 @@ TokenString tokenize_wiki103(File *file)
     return result;
 }
 
+typedef struct Tag
+{
+    u8 *tag;
+    i32 length;
+    b32 keep_body;
+} Tag;
+
+#define memcmp_eq_literal(a, literal) (memcmp(a, literal, sizeof(literal) - 1) == 0)
+
+Tag consume_tag(u8 **cursor)
+{
+    u8 *p = *cursor;
+    assert(*p == '<');
+    p++;
+    Tag result = { .tag = p };
+
+    while ((*p != '>') && (is_whitespace(p) == false)) {
+        result.length++;
+        p++;
+    }
+
+    while (*p++ != '>') {
+        ;
+    }
+
+    result.keep_body = (result.tag[0] == '/')    // Closing tag
+                    || (p[-2] == '/')            // Self-closing tag
+                    || memcmp_eq_literal(result.tag, "sp")
+                    || memcmp_eq_literal(result.tag, "p")
+                    || memcmp_eq_literal(result.tag, "title")
+                    || memcmp_eq_literal(result.tag, "speaker")
+                    || memcmp_eq_literal(result.tag, "placeName")
+                    || memcmp_eq_literal(result.tag, "quote")
+                    || memcmp_eq_literal(result.tag, "l ")
+                    || memcmp_eq_literal(result.tag, "l>")
+                    || memcmp_eq_literal(result.tag, "foreign")
+                    || memcmp_eq_literal(result.tag, "div1");
+
+    *cursor = p;
+    return result;
+}
+
+void skip_tag(u8 **cursor, Tag tag)
+{
+    assert(tag.keep_body == false);
+    u8 *p = *cursor;
+    while (memcmp(p, tag.tag, tag.length) != 0) {
+        p++;
+    }
+    if (p[-1] != '/') {
+        p++;
+        skip_tag(&p, tag);
+    }
+    while (*p++ != '>') {
+        ;
+    }
+    *cursor = p;
+}
+
+void skip_perseus_xml_whitespace_and_tags(u8 **cursor)
+{
+    u8 *p = *cursor;
+    while (is_whitespace(p) || *p == '<') {
+        while (*p && is_whitespace(p)) {
+            p++;
+        }
+        if (*p == '<') {
+            Tag tag = consume_tag(&p);
+            if (tag.keep_body == false) {
+               skip_tag(&p, tag);
+            }
+        }
+    }
+    *cursor = p;
+}
+
+TokenString tokenize_perseus_xml(File *file)
+{
+    u8 *text = file->data;
+    assert(text[file->size - 1] == 0);
+
+    TokenString result = {0};
+
+    u8 *p = text;
+
+    while (memcmp_eq_literal(p, "<sp>") == false) {
+        p++;
+    }
+
+    while (*p) {
+        skip_perseus_xml_whitespace_and_tags(&p);
+        if (*p) {
+            // Treat the actual text like markdown
+            u8 *start = consume_markdown_token(&p);
+            u8 *end = p;
+            assert(*start != '<');
+            if (start != end) {
+                push_token(&result, intern(start, end - start));
+            }
+        }
+    }
+
+    return result;
+}
+
 void dump_token_string(TokenString *string)
 {
     print_tokens(string->tokens, string->length);
@@ -1836,20 +2121,33 @@ void dump_markov_chain(MarkovChain *chain)
     printf("\n\n");
 }
 
+TokenString *partition_token_string(TokenString *string, i32 partitions)
+{
+    TokenString *result = stack_alloc(&scratch, TokenString, partitions);
+    i32 tokens_per_partition = string->length / partitions;
+    // Discard end tokens if not an even division. We already handle partition
+    // boundaries incorrectly, and this is really intended for big corpuses,
+    // where the difference amounts to rounding error
+    i32 token_index = 0;
+    for (isize i = 0; i < partitions; i++) {
+        result[i] = (TokenString) { string->tokens + token_index, tokens_per_partition, 0 };
+        token_index += tokens_per_partition;
+    }
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    isize scratch_size = MB(128);
-    u8 *scratch_blob = malloc(scratch_size);
-    scratch = (Stack) { scratch_blob, scratch_blob, scratch_blob + scratch_size };
-    isize everything_else_size = GB(4);
-    u8 *everything_else_blob = malloc(everything_else_size);
-    everything_else.allocator = (Stack) { everything_else_blob, everything_else_blob, everything_else_blob + everything_else_size };
-
-    isize blob_size = GB(8);
-    u8 *blob = malloc(blob_size);
+    isize blob_size = GB(16);
+    u8 *blob = system_alloc(blob_size);
+    assert(blob);
     Stack stack = { blob, blob, blob + blob_size };
+
+    scratch = push_stack_size(&stack, MB(8));
+    buckets.allocator = push_stack_size(&stack, GB(1));
+    stack = push_stack(&stack);
 
     random_state.inc = ticks();
 
@@ -1857,68 +2155,56 @@ int main(int argc, char **argv)
     // This lets us skip it easily during text analysis/generation.
     intern((u8*)"<unk>", sizeof("<unk>") - 1);
 
-#if defined(Config_ColorizeOutput) && Config_ColorizeOutput
-    char *foreground_color_code_prefix = "\x1B[38;5;";
-    char *color_code_postfix = "m";
-    char *background_color_code_prefix = "\x1B[48;5;";
-    char color_code[32];
-    for (isize i = 0; i < 256; i++) {
-        isize len = snprintf(color_code, sizeof(color_code), "%s%lld%s", foreground_color_code_prefix, i, color_code_postfix);
-        foreground_color_tokens[i] = intern((u8 *)color_code, len);
-        len = snprintf(color_code, sizeof(color_code), "%s%lld%s", background_color_code_prefix, i, color_code_postfix);
-        background_color_tokens[i] = intern((u8 *)color_code, len);
-    }
-#endif
-
     i64 ticks_a = ticks();
 
     SourceText sources[] = {
-        { .text = tokenize_md((File[]){ read_file(&stack, 0, "dnd.md") }) },
+        { .text = tokenize_md((File[]){ read_file(&stack, 0, "markov/dnd.md")})},
+        { .text = tokenize_perseus_xml((File[]){ read_file(&stack, 0, "markov/republic.xml")})},
     };
 
     i64 ticks_b = ticks();
 
-    clear_stack(&stack);
-
-    MarkovChain chains[] = {
-        { .source = &sources[0], .order = 2, .offset = 0, .stride = 1, .power = 0, .required =true },
-        { .source = &sources[0], .order = 1, .offset = 0, .stride = 1, .power = 4., },
-        { .source = &sources[0], .order = 1, .offset = 1, .stride = 1, .power = 1./(1*1.), },
-        { .source = &sources[0], .order = 1, .offset = 2, .stride = 1, .power = 1./(2*2.), },
-        { .source = &sources[0], .order = 1, .offset = 3, .stride = 1, .power = 1./(3*3.), },
-        { .source = &sources[0], .order = 1, .offset = 4, .stride = 1, .power = 1./(4*4.), },
-        { .source = &sources[0], .order = 1, .offset = 5, .stride = 1, .power = 1./(5*5.), },
-        { .source = &sources[0], .order = 1, .offset = 6, .stride = 1, .power = 1./(6*6.), },
-        { .source = &sources[0], .order = 1, .offset = 7, .stride = 1, .power = 1./(7*7.), },
-        { .source = &sources[0], .order = 1, .offset = 8, .stride = 1, .power = 1./(8*8.), },
-        { .source = &sources[0], .order = 1, .offset = 9, .stride = 1, .power = 1./(9*9.), },
-        { .source = &sources[0], .order = 1, .offset = 10, .stride = 1, .power = 1./(10*10.), },
-        { .source = &sources[0], .order = 1, .offset = 11, .stride = 1, .power = 1./(11*11.), },
-        { .source = &sources[0], .order = 1, .offset = 12, .stride = 1, .power = 1./(12*12.), },
-        { .source = &sources[0], .order = 1, .offset = 13, .stride = 1, .power = 1./(13*13.), },
-        { .source = &sources[0], .order = 1, .offset = 14, .stride = 1, .power = 1./(14*14.), },
-        { .source = &sources[0], .order = 1, .offset = 15, .stride = 1, .power = 1./(15*15.), },
-        { .source = &sources[0], .order = 1, .offset = 16, .stride = 1, .power = 1./(16*16.), },
+    MarkovChain chains_a[] = {
+        { .source = sources[0], .order = 1, .offset =  0, .stride = 1, .power = 0, .required = true },
+        { .source = sources[0], .order = 2, .offset =  0, .stride = 1, .power = 0, .required = true },
+        { .source = sources[0], .order = 2, .offset = 0, .stride = 1, .power = 1. / 2., .generator_window = 0 },
+        { .source = sources[0], .order = 2, .offset = 3, .stride = 1, .power = 1. / 4., .generator_window = 1 },
+        { .source = sources[0], .order = 2, .offset = 7, .stride = 1, .power = 1. / 9., .generator_window = 2, .analysis_window = 1 },
+        { .source = sources[0], .order = 2, .offset = 12, .stride = 1, .power = 1. / 16., .generator_window = 3, .analysis_window = 2 },
     };
-    isize n_chains = array_length(chains);
 
-    for (isize i = 0; i < n_chains; i++) {
-        build_markov_chain(&stack, &chains[i]);
-        if (chains[i].count_overflow) {
-            printf("chain %lld's count overflowed :(\n", i);
-            return 1;
-        }
-    }
-
-    MarkovChainSet set = {
-        .chains = chains,
-        .count = n_chains,
+    MarkovChain chains_b[] = {
+        { .source = sources[1], .order = 1, .offset =  0, .stride = 1, .power = 0, .required = true },
+        { .source = sources[1], .order = 2, .offset =  0, .stride = 1, .power = 0, .required = true },
+        { .source = sources[1], .order = 2, .offset = 0, .stride = 1, .power = 1. / 2., .generator_window = 0 },
+        { .source = sources[1], .order = 2, .offset = 3, .stride = 1, .power = 1. / 4., .generator_window = 1 },
+        { .source = sources[1], .order = 2, .offset = 7, .stride = 1, .power = 1. / 9., .generator_window = 2, .analysis_window = 1 },
+        { .source = sources[1], .order = 2, .offset = 12, .stride = 1, .power = 1. / 16., .generator_window = 3, .analysis_window = 2 },
     };
+
+    MarkovChain *chains_chains[] = { chains_a, chains_b };
+
+    MarkovChainSet sets[] = {
+        {
+            .chains = chains_a,
+            .count = array_length(chains_a),
+            .set_power = 1,
+            .absolute_power = true,
+        },
+        {
+            .chains = chains_b,
+            .count = array_length(chains_b),
+            .set_power = 1,
+            .absolute_power = true,
+        },
+    };
+
+    build_markov_chain_sets(&stack, sets, array_length(sets));
 
     i64 ticks_c = ticks();
 
-    TokenString *tokens = &chains[0].source->text;
-    TokenString generated = generate_markov_text(&set, tokens->tokens + randomi(&random_state, tokens->length / 4, tokens->length * 3 / 4), 4096);
+    TokenString *tokens = &chains_a[0].source.text;
+    TokenString generated = generate_markov_text(sets, array_length(sets), tokens->tokens + randomi(&random_state, tokens->length / 4, tokens->length * 3 / 4), 4096);
 
     i64 ticks_d = ticks();
 
@@ -1927,11 +2213,13 @@ int main(int argc, char **argv)
     printf("Analyse: %2.3fs\n", seconds_between(ticks_b, ticks_c));
     printf("Generate: %2.3fs\n", seconds_between(ticks_c, ticks_d));
 
-    for (isize i = 0; i < set.count; i++) {
-        printf("%d-%d-%d: %d (%d rejected)\n", chains[i].order, chains[i].offset, chains[i].stride, set.generated_counts[i], set.rejected_counts[i]);
+    for(isize i = 0; i < array_length(sets); i++) {
+        for (isize j = 0; j < sets[i].count; j++) {
+            printf("%lld %d-%d-%d: %d (%d rejected)\n", i, chains_chains[i][j].order, chains_chains[i][j].offset, chains_chains[i][j].stride, sets[i].generated_counts[j], sets[i].rejected_counts[j]);
+        }
     }
 
-    dump_buckets(&everything_else);
+
     dump_token_string(&generated);
 
     return 0;
